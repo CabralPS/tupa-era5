@@ -42,7 +42,7 @@ def aggregate_era5_to_gpcp():
                 gpcp_var[:, i, j] = np.mean(era5_var[:, lat_slice, lon_slice], axis=(1, 2))
         
         result[var] = gpcp_var
-        print(f"  {var}: std={np.std(gpcp_var):.2f}")
+        print(f"  {var}: std={np.std(gpcp_var):.4g}")
     
     # Salvar
     np.savez(DATA_DIR / "era5_gpcp_grid.npz", **result,

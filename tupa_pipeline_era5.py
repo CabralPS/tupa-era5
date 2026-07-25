@@ -113,7 +113,8 @@ def load_teleconnections(dates):
 # =============================================================================
 # 3. FEATURES (com ERA5)
 # =============================================================================
-def create_features(prec, clim_fc, tele, months, years, lats, lons, era5, lead=1):
+def create_features(prec, clim_fc, tele, months, years, lats, lons, era5,
+                    era5_clim=None, lead=1):
     T, nlat, nlon = prec.shape
     LAT, LON = np.meshgrid(lats, lons, indexing="ij")
     sin_m = np.sin(2 * np.pi * (months - 1) / 12.0)
@@ -129,26 +130,61 @@ def create_features(prec, clim_fc, tele, months, years, lats, lons, era5, lead=1
              (prec[src - lead] - clim_fc[src - lead])]
     names = ['sin', 'cos', 'lat', 'lon', 'anom(t)', 'anom(t-1)']
     
-    # ERA5 predictors (spatially varying)
-    for var_name in ['u850', 'u500', 'v850', 'v500', 'q850', 't2m']:
-        if var_name in era5:
-            era5_var = era5[var_name]
-            # Interpolar para grade do GPCP se necessário
-            if era5_var.shape[1:] != (nlat, nlon):
-                from scipy.ndimage import zoom
-                zoom_factors = (1, nlat / era5_var.shape[1], nlon / era5_var.shape[2])
-                era5_var = zoom(era5_var, zoom_factors, order=1)
-            feats.append(era5_var[src])
-            names.append(var_name)
+    # Ponderacao por latitude (cos(lat)) como feature para reduzir viés de
+    # oversampling das altas latitudes no pool espacial. Incluida tambem como
+    # peso de amostra no fit (ver train_xgboost).
+    lat_w = np.cos(np.deg2rad(LAT))
     
-    # Teleconexões
+    # ERA5 predictors (spatially varying) -- usar ANOMALIAS (vs climatologia mensal)
+    # + lag t-lead, conforme template do PROJECT.md.
+    for var_name in ['u850', 'u500', 'v850', 'v500', 'q850', 't2m']:
+        if var_name not in era5:
+            continue
+        era5_var = era5[var_name]
+        # Interpolar para grade do GPCP se necessário
+        if era5_var.shape != (T, nlat, nlon) and era5_var.shape[1:] != (nlat, nlon):
+            from scipy.ndimage import zoom
+            zoom_factors = (1, nlat / era5_var.shape[1], nlon / era5_var.shape[2])
+            era5_var = zoom(era5_var, zoom_factors, order=1)
+        if era5_clim is not None and var_name in era5_clim:
+            var_clim = era5_clim[var_name]                      # (12, nlat, nlon)
+            anom_t = era5_var[src] - var_clim[months[src] - 1]
+            anom_l = era5_var[src - lead] - var_clim[months[src - lead] - 1]
+        else:
+            # fallback degradado: usa valor bruto se nao houver climatologia
+            anom_t = era5_var[src] - era5_var[src].mean(axis=0, keepdims=True)
+            anom_l = era5_var[src - lead] - era5_var[src - lead].mean(axis=0, keepdims=True)
+        feats.append(anom_t);   names.append(f'{var_name}_anom')
+        feats.append(anom_l);   names.append(f'{var_name}_anom_l{lead}')
+    
+    # Teleconexões (ja centralizadas). Incluir lag para capturar precedencia.
     for key, series in tele.items():
-        feats.append(np.broadcast_to(series[src, None, None], b)); names.append(key)
+        feats.append(np.broadcast_to(series[src, None, None], b))
+        names.append(key)
+        feats.append(np.broadcast_to(series[src - lead, None, None], b))
+        names.append(f'{key}_l{lead}')
     
     X = np.stack(feats, axis=-1).reshape(-1, len(feats)).astype(np.float32)
     y = (prec[src + lead] - clim_fc[src + lead]).reshape(-1).astype(np.float32)
     y_years = np.broadcast_to(years[src + lead, None, None], b).reshape(-1)
-    return X, y, y_years, names
+    # Peso por lat para cada amostra (copia cos(lat) do ponto). Usado no fit.
+    lat_w_flat = np.broadcast_to(lat_w[None, :, :], b).reshape(-1).astype(np.float32)
+    return X, y, y_years, names, lat_w_flat, len(src)
+
+
+def era5_monthly_climatology(era5, months, train_mask):
+    """Climatologia mensal (12, nlat, nlon) por variavel ERA5, so no treino."""
+    clims = {}
+    for k, v in era5.items():
+        if v.ndim != 3:
+            continue
+        clim = np.zeros((12, *v.shape[1:]), dtype=np.float64)
+        for m in range(12):
+            sel = train_mask & (months == m + 1)
+            if sel.sum():
+                clim[m] = v[sel].mean(axis=0)
+        clims[k] = clim
+    return clims
 
 # =============================================================================
 # 4. BASELINES
@@ -185,15 +221,25 @@ def skill_score(pred, obs, ref, mask=None):
 # =============================================================================
 # 6. XGBOOST
 # =============================================================================
-def train_xgboost(X_train, y_train):
+def train_xgboost(X_train, y_train, X_val=None, y_val=None,
+                 sample_weight=None, feat_names=None):
     try:
         import xgboost as xgb
     except ImportError:
         print("  AVISO: xgboost ausente -> pulando ML."); return None
-    m = xgb.XGBRegressor(objective='reg:squarederror', max_depth=6, learning_rate=0.1,
-                         subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
-                         n_estimators=300, random_state=42, n_jobs=-1)
-    m.fit(X_train, y_train, verbose=False)
+    params = dict(objective='reg:squarederror', max_depth=6,
+                  learning_rate=0.05, subsample=0.8,
+                  colsample_bytree=0.8, min_child_weight=10,
+                  reg_lambda=2.0, n_estimators=800, random_state=42, n_jobs=-1)
+    if X_val is not None and y_val is not None:
+        params['early_stopping_rounds'] = 40
+    m = xgb.XGBRegressor(**params)
+    fit_kwargs = {'verbose': False}
+    if sample_weight is not None:
+        fit_kwargs['sample_weight'] = sample_weight
+    if X_val is not None and y_val is not None:
+        fit_kwargs['eval_set'] = [(X_val, y_val)]
+    m.fit(X_train, y_train, **fit_kwargs)
     return m
 
 def _plot_skill_maps(acc, skill, lats, lons):
@@ -253,12 +299,16 @@ def main():
     era5_vars = {k: v for k, v in era5.items() if k in ['u850','u500','v850','v500','q850','t2m']}
     print("  Variaveis: %s" % list(era5_vars.keys()))
     for k, v in era5_vars.items():
-        print("    %s: %s, std=%.2f" % (k, v.shape, np.std(v)))
+        print("    %s: %s, std=%.4g" % (k, v.shape, np.std(v)))
 
     print("\n[3/6] Split temporal...")
     train_mask = (years >= TRAIN_YEARS[0]) & (years <= TRAIN_YEARS[1])
     test_mask = (years >= TEST_YEARS[0]) & (years <= TEST_YEARS[1])
-    print("  treino %d meses | teste %d meses" % (int(train_mask.sum()), int(test_mask.sum())))
+    val_mask = (years >= 2017) & (years <= 2021)
+    # treino p/ features exclui a janela de validacao (early-stop sem vazamento)
+    train_feat_mask = (years >= TRAIN_YEARS[0]) & (years <= 2016)
+    print("  treino %d meses | val %d meses | teste %d meses"
+          % (int(train_mask.sum()), int(val_mask.sum()), int(test_mask.sum())))
 
     print("\n[4/6] Baselines...")
     clim = monthly_climatology(prec, months, train_mask)
@@ -270,39 +320,74 @@ def main():
     print("  Climatologia RMSE: %.3f" % r_clim)
     print("  Persistencia RMSE: %.3f | skill: %+.3f" % (r_pers, s_pers))
 
+    print("\n[4b/6] Climatologia dos preditores ERA5...")
+    era5_clim = era5_monthly_climatology(era5_vars, months, train_mask)
+    print("  clim por variavel: %s" % list(era5_clim.keys()))
+
     print("\n[5/6] Teleconexoes...")
     tele = load_teleconnections(data['dates'])
 
-    print("\n[6/6] Features + XGBoost (com ERA5)...")
-    X, y, y_years, feat_names = create_features(prec, clim_fc, tele, months, years, lats, lons, era5, lead=1)
-    tr = y_years <= TRAIN_YEARS[1]
-    te = y_years >= TEST_YEARS[0]
-    print("  %d features: %s" % (X.shape[1], feat_names))
-    print("  treino %d | teste %d" % (int(tr.sum()), int(te.sum())))
-    
-    model = train_xgboost(X[tr], y[tr])
+    print("\n[6/6] Features + XGBoost (com ERA5 anomalias + lags)...")
+    LEAD = 1
+    X, y, y_years, feat_names, lat_w_flat, n_src = create_features(
+        prec, clim_fc, tele, months, years, lats, lons, era5_vars,
+        era5_clim=era5_clim, lead=LEAD)
+    tr = y_years <= 2016
+    va = (y_years >= 2017) & (y_years <= 2021)
+    te = (y_years >= TEST_YEARS[0]) & (y_years <= TEST_YEARS[1])
+    print("  %d features" % X.shape[1])
+    print("  treino %d | val %d | teste %d" % (int(tr.sum()), int(va.sum()), int(te.sum())))
+
+    model = train_xgboost(X[tr], y[tr], X[va], y[va],
+                          sample_weight=lat_w_flat[tr], feat_names=feat_names)
     if model is not None:
+        nlat, nlon = len(lats), len(lons)
+        P = nlat * nlon
+        yr_pool = y_years.reshape(-1, nlat, nlon)[:, 0, 0]
+        te_step_pool = (yr_pool >= TEST_YEARS[0]) & (yr_pool <= TEST_YEARS[1])
         y_pred = model.predict(X[te])
         r_xgb = rmse(y_pred, y[te])
         r_clim_anom = rmse(np.zeros_like(y[te]), y[te])
         s_xgb = 1.0 - r_xgb / r_clim_anom if r_clim_anom > 0 else 0.0
-        print("\n  === RESULTADOS COM ERA5 ===")
-        print("  XGBoost anom-RMSE: %.3f | skill: %+.3f" % (r_xgb, s_xgb))
+        # Reconstrução total. Cada "linha" do pool => alvo = src+lead. As
+        # linhas do pool estão empilhadas por (passo, lat, lon), logo o idx
+        # de passo alvo de cada linha é o reshape[-1, P] por coluna.
+        te_passos = np.where(te_step_pool)[0]                  # idx no pool (por passo fonte)
+        alvo_steps = te_passos + 2 * LEAD                      # alvo = src + lead = i + 2*lead
+        clim_te = clim_fc[alvo_steps]                          # (n_te, lat, lon)
+        pred_anom_te = y_pred.reshape(-1, nlat, nlon)
+        pred_total = clim_te + pred_anom_te
+        obs_total = prec[alvo_steps]
+        # RMSE na escala total (todos os pontos, todas as celulas).
+        def _rmse_flat(a, b):
+            d = a - b
+            return float(np.sqrt(np.mean(d ** 2)))
+        r_clim_tot = _rmse_flat(clim_te, obs_total)
+        r_xgb_tot = _rmse_flat(pred_total, obs_total)
+        s_xgb_tot = 1.0 - r_xgb_tot / r_clim_tot if r_clim_tot > 0 else 0.0
+        print("\n  === RESULTADOS COM ERA5 (anomalias + lags) ===")
+        print("  Anomalia  | XGBoost RMSE: %.3f | skill: %+.3f" % (r_xgb, s_xgb))
+        print("  Total     | XGBoost RMSE: %.3f | skill vs clim: %+.3f (clim RMSE=%.3f)"
+              % (r_xgb_tot, s_xgb_tot, r_clim_tot))
+        if hasattr(model, 'best_iteration'):
+            print("  best_iteration: %s" % getattr(model, 'best_iteration', '?'))
         
         if hasattr(model, 'feature_importances_'):
             imp = model.feature_importances_
-            top = np.argsort(imp)[::-1][:10]
-            print("  Top 10 features:")
+            top = np.argsort(imp)[::-1][:12]
+            print("  Top 12 features:")
             for i in top:
-                print("    %s: %.3f" % (feat_names[i], imp[i]))
+                print("    %s: %.4f" % (feat_names[i], imp[i]))
         
         print("\n  Skill regional:")
         evaluate_regional_skill(model, X, y, y_years, lats, lons)
 
     print("\nSalvando resultados...")
-    res = {'climatology_rmse': r_clim, 'persistence_rmse': r_pers, 'persistence_skill': s_pers}
+    res = {'climatology_rmse': r_clim, 'persistence_rmse': r_pers,
+           'persistence_skill': s_pers}
     if model is not None:
         res['xgboost_rmse'] = r_xgb; res['xgboost_skill'] = s_xgb
+        res['xgboost_rmse_total'] = r_xgb_tot; res['xgboost_skill_total'] = s_xgb_tot
     np.savez('tupa_era5_results.npz', **res)
     print("=" * 60)
 
