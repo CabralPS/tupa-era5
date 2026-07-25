@@ -6,7 +6,5 @@ __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
-tupã_results.npz
-tupã_skill_maps.png
-figures/
+tupa_results.npz
 data/

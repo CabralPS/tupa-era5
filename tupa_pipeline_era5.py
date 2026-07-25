@@ -242,11 +242,15 @@ def train_xgboost(X_train, y_train, X_val=None, y_val=None,
     m.fit(X_train, y_train, **fit_kwargs)
     return m
 
-def _plot_skill_maps(acc, skill, lats, lons):
+def _plot_skill_maps(acc, skill, lats, lons, save_path='figures/tupa_skill_maps.png'):
     try:
+        import matplotlib
+        matplotlib.use('Agg')
         import matplotlib.pyplot as plt
     except Exception:
         print("  (matplotlib ausente - mapa pulado)"); return
+    import os
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
     LAT, LON = np.meshgrid(lats, lons, indexing="ij")
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
     for a, field, title, cmap, vmin, vmax in [
@@ -255,7 +259,10 @@ def _plot_skill_maps(acc, skill, lats, lons):
         pcm = a.pcolormesh(LON, LAT, field, cmap=cmap, vmin=vmin, vmax=vmax, shading="auto")
         a.set_title(title); a.set_xlabel("lon"); a.set_ylabel("lat")
         plt.colorbar(pcm, ax=a)
-    fig.tight_layout(); plt.show()
+    fig.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print("  Mapa salvo: %s" % save_path)
+    plt.show()
 
 def evaluate_regional_skill(model, X, y, y_years, lats, lons):
     nlat, nlon = len(lats), len(lons)
