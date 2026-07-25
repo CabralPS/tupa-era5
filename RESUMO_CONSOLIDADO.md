@@ -98,16 +98,12 @@ print('GPCP OK')
 # 4. Clonar repo e rodar
 !git clone https://github.com/CabralPS/tupa-era5.git
 %cd tupa-era5
-%run tupa_pipeline.py
-
-# 5. Ver mapas
-from IPython.display import Image
-Image('figures/tupa_skill_maps.png')
+%run tupa_pipeline_era5.py
 ```
 
 ## Próximos Passos (antes do Top-3)
 
-1. **CDS key** → Baixar ERA5 pressure-level predictors
-2. **Ponderação latitude** → Corrigir oversampling
+1. ~~CDS key~~ ✓ (ja temos ERA5)
+2. ~~Ponderação latitude~~ ✓ (cos lat implementado)
 3. **Ensemble** → Média de múltiplos modelos
-4. **Feature engineering** → Anomalias de TMI/TRMM
+4. **Spec WorCAP** → Estender TEST_YEARS para 2026
