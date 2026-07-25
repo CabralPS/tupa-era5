@@ -12,6 +12,18 @@ Ou localmente:
 import numpy as np
 import pandas as pd
 import sys
+import os
+
+
+def _gpcp():
+    """Caminho do GPCP-SA: busca em locais comuns (Windows local + Colab)."""
+    for c in (os.environ.get('GPCP_SA_NPZ'), 'gpcp_sa.npz',
+              '../tup_data/gpcp_sa.npz', 'tup_data/gpcp_sa.npz',
+              'C:/Users/axnva/tup_data/gpcp_sa.npz'):
+        if c and os.path.exists(c):
+            return c
+    return 'gpcp_sa.npz'
+
 
 # =============================================================================
 # Testes automatizados
@@ -20,7 +32,7 @@ def test_load_gpcp():
     """Testa carregamento do GPCP."""
     print("[TESTE 1] Carregando GPCP...")
     try:
-        data = np.load('C:/Users/axnva/tup_data/gpcp_sa.npz')
+        data = np.load(_gpcp())
         prec = data['precipitation']
         lats = data['lats']
         lons = data['lons']
@@ -48,7 +60,7 @@ def test_climatology():
     """Testa cálculo da climatologia."""
     print("[TESTE 2] Calculando climatologia...")
     try:
-        data = np.load('C:/Users/axnva/tup_data/gpcp_sa.npz')
+        data = np.load(_gpcp())
         prec = data['precipitation']
         months = np.array([pd.Timestamp(d).month for d in data['dates']])
         years = np.array([pd.Timestamp(d).year for d in data['dates']])
@@ -78,7 +90,7 @@ def test_persistence():
     """Testa persistência."""
     print("[TESTE 3] Calculando persistência...")
     try:
-        data = np.load('C:/Users/axnva/tup_data/gpcp_sa.npz')
+        data = np.load(_gpcp())
         prec = data['precipitation']
         
         pers = np.empty_like(prec, dtype=np.float64)
@@ -147,7 +159,7 @@ def test_baseline_values():
     """Verifica se os valores do baseline batem com o esperado."""
     print("[TESTE 6] Verificando valores do baseline...")
     try:
-        data = np.load('C:/Users/axnva/tup_data/gpcp_sa.npz')
+        data = np.load(_gpcp())
         prec = data['precipitation']
         months = np.array([pd.Timestamp(d).month for d in data['dates']])
         years = np.array([pd.Timestamp(d).year for d in data['dates']])
