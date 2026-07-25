@@ -1,0 +1,12 @@
+# Dados grandes
+*.nc
+*.npz
+*.parquet
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+tupã_results.npz
+tupã_skill_maps.png
+figures/
+data/
