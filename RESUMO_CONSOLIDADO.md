@@ -70,7 +70,7 @@ tupã-era5/
 
 ```python
 # 1. Clonar ou upload do repositório
-!git clone https://github.com/SEU_USER/tupa-era5.git
+!git clone https://github.com/CabralPS/tupa-era5.git
 %cd tupa-era5
 
 # 2. Instalar dependências
